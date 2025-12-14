@@ -101,18 +101,66 @@ class _CRG(LiteXModule):
 class BitcoinMinerCSR(LiteXModule, AutoCSR):
     def __init__(self, platform):
         # Inputs from CPU
-        self.start    = CSRStorage(description="Start mining (write 1 for a pulse)")
-        self.block0   = [CSRStorage(32, name=f"block0_{i}") for i in range(16)]
-        self.block1   = [CSRStorage(32, name=f"block1_{i}") for i in range(16)]
-        self.target   = [CSRStorage(32, name=f"target_{i}") for i in range(8)]
+        self.start = CSRStorage(description="Start mining (write 1 for a pulse)")
+
+        # Em vez de listas, declarar cada CSR individualmente para garantir
+        # que o gerador de CSRs crie entradas em csr.h.
+        self.block0_0  = CSRStorage(32, description="Block0 word 0")
+        self.block0_1  = CSRStorage(32, description="Block0 word 1")
+        self.block0_2  = CSRStorage(32, description="Block0 word 2")
+        self.block0_3  = CSRStorage(32, description="Block0 word 3")
+        self.block0_4  = CSRStorage(32, description="Block0 word 4")
+        self.block0_5  = CSRStorage(32, description="Block0 word 5")
+        self.block0_6  = CSRStorage(32, description="Block0 word 6")
+        self.block0_7  = CSRStorage(32, description="Block0 word 7")
+        self.block0_8  = CSRStorage(32, description="Block0 word 8")
+        self.block0_9  = CSRStorage(32, description="Block0 word 9")
+        self.block0_10 = CSRStorage(32, description="Block0 word 10")
+        self.block0_11 = CSRStorage(32, description="Block0 word 11")
+        self.block0_12 = CSRStorage(32, description="Block0 word 12")
+        self.block0_13 = CSRStorage(32, description="Block0 word 13")
+        self.block0_14 = CSRStorage(32, description="Block0 word 14")
+        self.block0_15 = CSRStorage(32, description="Block0 word 15")
+
+        self.block1_0  = CSRStorage(32, description="Block1 word 0")
+        self.block1_1  = CSRStorage(32, description="Block1 word 1")
+        self.block1_2  = CSRStorage(32, description="Block1 word 2")
+        self.block1_3  = CSRStorage(32, description="Block1 word 3")
+        self.block1_4  = CSRStorage(32, description="Block1 word 4")
+        self.block1_5  = CSRStorage(32, description="Block1 word 5")
+        self.block1_6  = CSRStorage(32, description="Block1 word 6")
+        self.block1_7  = CSRStorage(32, description="Block1 word 7")
+        self.block1_8  = CSRStorage(32, description="Block1 word 8")
+        self.block1_9  = CSRStorage(32, description="Block1 word 9")
+        self.block1_10 = CSRStorage(32, description="Block1 word 10")
+        self.block1_11 = CSRStorage(32, description="Block1 word 11")
+        self.block1_12 = CSRStorage(32, description="Block1 word 12")
+        self.block1_13 = CSRStorage(32, description="Block1 word 13")
+        self.block1_14 = CSRStorage(32, description="Block1 word 14")
+        self.block1_15 = CSRStorage(32, description="Block1 word 15")
+
+        self.target_0  = CSRStorage(32, description="Target word 0")
+        self.target_1  = CSRStorage(32, description="Target word 1")
+        self.target_2  = CSRStorage(32, description="Target word 2")
+        self.target_3  = CSRStorage(32, description="Target word 3")
+        self.target_4  = CSRStorage(32, description="Target word 4")
+        self.target_5  = CSRStorage(32, description="Target word 5")
+        self.target_6  = CSRStorage(32, description="Target word 6")
+        self.target_7  = CSRStorage(32, description="Target word 7")
 
         # Outputs to CPU
-        # status[0] = busy, status[1] = found
-        self.status       = CSRStatus(2, description="bit0=busy, bit1=found")
-        self.found_nonce  = CSRStatus(32, description="Nonce encontrado")
-        self.found_hash   = [CSRStatus(32, name=f"found_hash_{i}") for i in range(8)]
+        self.status      = CSRStatus(2,  description="bit0=busy, bit1=found")
+        self.found_nonce = CSRStatus(32, description="Nonce encontrado")
+        self.found_hash_0 = CSRStatus(32, description="Found hash word 0")
+        self.found_hash_1 = CSRStatus(32, description="Found hash word 1")
+        self.found_hash_2 = CSRStatus(32, description="Found hash word 2")
+        self.found_hash_3 = CSRStatus(32, description="Found hash word 3")
+        self.found_hash_4 = CSRStatus(32, description="Found hash word 4")
+        self.found_hash_5 = CSRStatus(32, description="Found hash word 5")
+        self.found_hash_6 = CSRStatus(32, description="Found hash word 6")
+        self.found_hash_7 = CSRStatus(32, description="Found hash word 7")
 
-        # Internal signals towards Verilog miner
+        # Internal signals
         miner_start = Signal()
         miner_busy  = Signal()
         miner_found = Signal()
@@ -123,20 +171,57 @@ class BitcoinMinerCSR(LiteXModule, AutoCSR):
         block1_sig  = Signal(512)
         target_sig  = Signal(256)
 
-        # Map CSR storages into wide buses (32-bit words concatenated)
+        # Mapear manualmente os 16 words de block0/block1/8 words de target.
         self.comb += [
+            # Gera um pulso de start a partir de uma escrita em self.start
             miner_start.eq(self.start.re),
-            block0_sig.eq(Cat(*[w.storage for w in self.block0])),
-            block1_sig.eq(Cat(*[w.storage for w in self.block1])),
-            target_sig.eq(Cat(*[w.storage for w in self.target])),
+
+            block0_sig.eq(Cat(
+                self.block0_0.storage,  self.block0_1.storage,
+                self.block0_2.storage,  self.block0_3.storage,
+                self.block0_4.storage,  self.block0_5.storage,
+                self.block0_6.storage,  self.block0_7.storage,
+                self.block0_8.storage,  self.block0_9.storage,
+                self.block0_10.storage, self.block0_11.storage,
+                self.block0_12.storage, self.block0_13.storage,
+                self.block0_14.storage, self.block0_15.storage
+            )),
+
+            block1_sig.eq(Cat(
+                self.block1_0.storage,  self.block1_1.storage,
+                self.block1_2.storage,  self.block1_3.storage,
+                self.block1_4.storage,  self.block1_5.storage,
+                self.block1_6.storage,  self.block1_7.storage,
+                self.block1_8.storage,  self.block1_9.storage,
+                self.block1_10.storage, self.block1_11.storage,
+                self.block1_12.storage, self.block1_13.storage,
+                self.block1_14.storage, self.block1_15.storage
+            )),
+
+            # Agora o target vem dos CSRs target_0..7 (configurável pelo firmware)
+            target_sig.eq(Cat(
+                self.target_0.storage,  self.target_1.storage,
+                self.target_2.storage,  self.target_3.storage,
+                self.target_4.storage,  self.target_5.storage,
+                self.target_6.storage,  self.target_7.storage
+            )),
 
             self.status.status[0].eq(miner_busy),
             self.status.status[1].eq(miner_found),
             self.found_nonce.status.eq(miner_nonce),
-            Cat(*[w.status for w in self.found_hash]).eq(miner_hash)
+
+            Cat(
+                self.found_hash_0.status,
+                self.found_hash_1.status,
+                self.found_hash_2.status,
+                self.found_hash_3.status,
+                self.found_hash_4.status,
+                self.found_hash_5.status,
+                self.found_hash_6.status,
+                self.found_hash_7.status
+            ).eq(miner_hash)
         ]
 
-        # Instance of the Verilog bitcoin miner engine
         self.specials += Instance("bitcoin_miner",
             i_clk         = ClockSignal("sys"),
             i_rst         = ResetSignal("sys"),
@@ -150,10 +235,9 @@ class BitcoinMinerCSR(LiteXModule, AutoCSR):
             o_found_hash  = miner_hash,
         )
 
-        # Add Verilog sources for the miner and SHA cores (em rtl/)
-        platform.add_source("../rtl/sha256_core.sv")
-        platform.add_source("../rtl/sha256_double.sv")
-        platform.add_source("../rtl/bitcoin_miner.sv")
+        platform.add_source("./rtl/sha256_core.sv")
+        platform.add_source("./rtl/sha256_double.sv")
+        platform.add_source("./rtl/bitcoin_miner.sv")
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
@@ -197,14 +281,12 @@ class BaseSoC(SoCCore):
 
         platform.add_extension(leds_pads)
 
-        # Substitui o controle padrão de LEDs por GPIO de 8 bits para placa de expansão
         self.submodules.leds = GPIOOut(platform.request("leds_ext"))
         self.add_csr("leds")
 
         # Bitcoin miner engine (exposto via CSRs) -------------------------------------------------
         self.submodules.btcminer = BitcoinMinerCSR(platform)
         self.add_csr("btcminer")
-
 
         # SPI Flash --------------------------------------------------------------------------------
         if board == "i5":
