@@ -192,17 +192,6 @@ static void reboot(void)
     ctrl_reset_write(1);
 }
 
-static void toggle_led(void)
-{
-    int i;
-    printf("invertendo led...\n");
-    #ifdef CSR_LEDS_OUT_ADDR
-    i = leds_out_read();
-    leds_out_write(!i);
-    #else
-    printf("LED CSR nao disponivel neste SoC.\n");
-    #endif
-}
 
 // -------------------------
 // Controle simples do miner
@@ -440,8 +429,6 @@ static void console_service(void) {
         help();
     else if(strcmp(token, "reboot") == 0)
         reboot();
-    else if(strcmp(token, "led") == 0)
-        toggle_led();
     else if(strcmp(token, "miner_start") == 0)
         miner_start_cmd();
     else if(strcmp(token, "miner_status") == 0)
