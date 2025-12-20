@@ -21,3 +21,6 @@ __pycache__/
 *.swo
 .vscode/
 .idea/
+
+firmware/*.d
+firmware/*.elf.map
