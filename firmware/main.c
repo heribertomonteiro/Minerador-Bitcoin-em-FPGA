@@ -118,7 +118,7 @@ static inline void btcminer_target_write(int idx, uint32_t v)
 static char *readstr(void)
 {
     char c[2];
-    static char s[64];
+    static char s[512];  // Aumentado de 64 para 512 para receber job completo
     static int ptr = 0;
 
     if(readchar_nonblock()) {
@@ -182,6 +182,9 @@ static void help(void)
     puts("miner_start                     - inicia mineracao de teste");
     puts("miner_status                    - mostra status/resultado do minerador");
     puts("miner_auto                      - inicia mineracao e espera ate encontrar nonce");
+    puts("miner_target_easy               - carrega job facil de demonstracao e inicia mineracao");
+    puts("miner_job <hex_data>            - carrega job da pool (80 bytes header + 32 bytes target em hex)");
+    puts("miner_clear                     - limpa resultado anterior");
 }
 
 static void reboot(void)
@@ -205,6 +208,7 @@ static void toggle_led(void)
 // Controle simples do miner
 // -------------------------
 
+// Job de teste "realista" com target difícil (para simular um bloco verdadeiro)
 static void miner_load_simple_job(void)
 {
     int i;
@@ -247,6 +251,35 @@ static void miner_load_simple_job(void)
     for (i = 0; i < 7; i++)
         btcminer_target_write(i, 0x00000000);
     btcminer_target_write(7, 0x0000FFFF);
+}
+
+// Job de teste BEM FÁCIL para demonstração local (encontrar nonce rápido)
+static void miner_load_easy_job(void)
+{
+    int i;
+
+    printf("Carregando job de teste FACIL (header simples, target MUITO facil)...\n");
+
+    // Header simples: zera tudo
+    for (i = 0; i < 16; i++)
+        btcminer_block0_write(i, 0x00000000);
+    for (i = 0; i < 16; i++)
+        btcminer_block1_write(i, 0x00000000);
+
+    // Target extremamente fácil: todos os bits em 1
+    // Qualquer hash será < target, então o primeiro nonce
+    // que o miner testar já deve satisfazer a condição.
+    for (i = 0; i < 8; i++)
+        btcminer_target_write(i, 0xFFFFFFFF);
+}
+
+// Comando: carrega job fácil e inicia mineração
+static void miner_target_easy_cmd(void)
+{
+    printf("Configurando job FACIL e iniciando mineracao (modo demonstracao)...\n");
+    miner_load_easy_job();
+    btcminer_start_pulse();
+    printf("Job facil iniciado. Use 'miner_status' para verificar quando encontrar nonce.\n");
 }
 
 static void miner_start_cmd(void)
@@ -323,6 +356,89 @@ static void miner_auto_cmd(void)
     }
 }
 
+// Converte 2 caracteres hex para byte
+static uint8_t hex_to_byte(const char *hex)
+{
+    uint8_t val = 0;
+    for (int i = 0; i < 2; i++) {
+        val <<= 4;
+        char c = hex[i];
+        if (c >= '0' && c <= '9')
+            val |= (c - '0');
+        else if (c >= 'a' && c <= 'f')
+            val |= (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            val |= (c - 'A' + 10);
+    }
+    return val;
+}
+
+// Novo comando para limpar estado (força novo job)
+static void miner_clear_cmd(void)
+{
+    printf("Limpando estado do minerador...\n");
+    // Re-escrever o registrador start para resetar o estado interno
+    btcminer_start_pulse();
+    printf("Estado limpo. Pronto para novo job.\n");
+}
+
+static void miner_job_cmd(char *hex_data)
+{
+    int len = strlen(hex_data);
+    
+    printf("Recebido: %d caracteres\n", len);
+    
+    // Formato esperado: 224 caracteres hex (112 bytes = 80 header + 32 target)
+    if (len < 224) {
+        printf("Erro: dados insuficientes. Esperado 224, recebido %d.\n", len);
+        return;
+    }
+    
+    printf("Carregando job da pool...\n");
+    
+    // Parseia header (80 bytes = 20 words de 32 bits)
+    uint32_t header[20];
+    for (int i = 0; i < 20; i++) {
+        header[i] = 0;
+        for (int j = 0; j < 4; j++) {
+            header[i] |= ((uint32_t)hex_to_byte(&hex_data[(i*8) + (j*2)])) << (j*8);
+        }
+    }
+    
+    // Parseia target (32 bytes = 8 words de 32 bits)
+    uint32_t target[8];
+    for (int i = 0; i < 8; i++) {
+        target[i] = 0;
+        for (int j = 0; j < 4; j++) {
+            target[i] |= ((uint32_t)hex_to_byte(&hex_data[160 + (i*8) + (j*2)])) << (j*8);
+        }
+    }
+    
+    // DEBUG: mostra primeiro word de cada bloco
+    printf("DEBUG: block0[0]=0x%08lx block1[0]=0x%08lx target[7]=0x%08lx\n",
+           (unsigned long)header[0], (unsigned long)header[16], (unsigned long)target[7]);
+    
+    // DEBUG: mostra primeiros bytes
+    printf("DEBUG: Primeiros 16 chars: %.16s\n", hex_data);
+    
+    // Carrega block0 (primeiros 16 words do header)
+    for (int i = 0; i < 16; i++)
+        btcminer_block0_write(i, header[i]);
+    
+    // Carrega block1 (últimos 4 words do header + padding)
+    for (int i = 0; i < 4; i++)
+        btcminer_block1_write(i, header[16 + i]);
+    for (int i = 4; i < 16; i++)
+        btcminer_block1_write(i, 0);
+    
+    // Carrega target
+    for (int i = 0; i < 8; i++)
+        btcminer_target_write(i, target[i]);
+    
+    printf("Job carregado. Iniciando mineracao...\n");
+    btcminer_start_pulse();
+}
+
 static void console_service(void) {
     char *str;
     char *token;
@@ -342,6 +458,12 @@ static void console_service(void) {
         miner_status_cmd();
     else if(strcmp(token, "miner_auto") == 0)
         miner_auto_cmd();
+    else if(strcmp(token, "miner_target_easy") == 0)
+        miner_target_easy_cmd();
+    else if(strcmp(token, "miner_job") == 0)
+        miner_job_cmd(str);
+    else if(strcmp(token, "miner_clear") == 0)
+        miner_clear_cmd();
     prompt();
 }
 

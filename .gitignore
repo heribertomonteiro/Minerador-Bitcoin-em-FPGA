@@ -8,7 +8,6 @@ build/
 # LiteX / toolchain temporários
 *.json
 *.hdr
-*.ld
 *.o
 
 # Python cache
