@@ -382,60 +382,50 @@ static void miner_clear_cmd(void)
     printf("Estado limpo. Pronto para novo job.\n");
 }
 
+// Adicione esta função logo após as includes ou no início do arquivo, antes de miner_job_cmd
+static inline uint32_t swap_endian(uint32_t x) {
+    return ((x >> 24) & 0xff) |
+           ((x >> 8)  & 0xff00) |
+           ((x << 8)  & 0xff0000) |
+           ((x << 24) & 0xff000000);
+}
+
+// Modifique a função miner_job_cmd existente:
 static void miner_job_cmd(char *hex_data)
 {
     int len = strlen(hex_data);
-    
-    printf("Recebido: %d caracteres\n", len);
-    
-    // Formato esperado: 224 caracteres hex (112 bytes = 80 header + 32 target)
+    // 224 hex chars = 80 bytes header + 32 bytes target
     if (len < 224) {
-        printf("Erro: dados insuficientes. Esperado 224, recebido %d.\n", len);
+        printf("Erro: Tamanho insuficiente (%d)\n", len);
         return;
     }
-    
-    printf("Carregando job da pool...\n");
-    
-    // Parseia header (80 bytes = 20 words de 32 bits)
-    uint32_t header[20];
+
+    uint32_t val;
+
+    // --- Processar Header (80 bytes -> 20 words) ---
     for (int i = 0; i < 20; i++) {
-        header[i] = 0;
+        val = 0;
         for (int j = 0; j < 4; j++) {
-            header[i] |= ((uint32_t)hex_to_byte(&hex_data[(i*8) + (j*2)])) << (j*8);
+            // Monta a word invertendo para Big-Endian
+            val |= ((uint32_t)hex_to_byte(&hex_data[(i * 8) + (j * 2)])) << (24 - (j * 8));
         }
+        
+        if (i < 16)
+            btcminer_block0_write(i, val);
+        else
+            btcminer_block1_write(i - 16, val);
     }
-    
-    // Parseia target (32 bytes = 8 words de 32 bits)
-    uint32_t target[8];
+
+    // --- Processar Target (32 bytes -> 8 words) ---
     for (int i = 0; i < 8; i++) {
-        target[i] = 0;
+        val = 0;
         for (int j = 0; j < 4; j++) {
-            target[i] |= ((uint32_t)hex_to_byte(&hex_data[160 + (i*8) + (j*2)])) << (j*8);
+            val |= ((uint32_t)hex_to_byte(&hex_data[160 + (i * 8) + (j * 2)])) << (24 - (j * 8));
         }
+        btcminer_target_write(i, val);
     }
-    
-    // DEBUG: mostra primeiro word de cada bloco
-    printf("DEBUG: block0[0]=0x%08lx block1[0]=0x%08lx target[7]=0x%08lx\n",
-           (unsigned long)header[0], (unsigned long)header[16], (unsigned long)target[7]);
-    
-    // DEBUG: mostra primeiros bytes
-    printf("DEBUG: Primeiros 16 chars: %.16s\n", hex_data);
-    
-    // Carrega block0 (primeiros 16 words do header)
-    for (int i = 0; i < 16; i++)
-        btcminer_block0_write(i, header[i]);
-    
-    // Carrega block1 (últimos 4 words do header + padding)
-    for (int i = 0; i < 4; i++)
-        btcminer_block1_write(i, header[16 + i]);
-    for (int i = 4; i < 16; i++)
-        btcminer_block1_write(i, 0);
-    
-    // Carrega target
-    for (int i = 0; i < 8; i++)
-        btcminer_target_write(i, target[i]);
-    
-    printf("Job carregado. Iniciando mineracao...\n");
+
+    printf("Job carregado corretamente. Minerando...\n");
     btcminer_start_pulse();
 }
 
