@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Proxy entre pool Stratum (via internet do PC) e minerador FPGA (via UART).
+Proxy Stratum → FPGA
+- MODO TESTE : difficulty forçada + share inicial (dashboard)
+- MODO REAL  : difficulty real da pool
+- Hashrate LOCAL exibido em tempo real
 """
+
 import socket
 import json
 import serial
@@ -9,366 +13,308 @@ import time
 import struct
 import binascii
 import hashlib
+import sys
 
-# ============================================
-# CONFIGURAÇÃO - Braiins Pool (Slush Pool)
-# ============================================
+# =========================================================
+# CONFIGURAÇÃO
+# =========================================================
 
-POOL_HOST = "stratum.braiins.com"
+POOL_HOST = "public-pool.io"
 POOL_PORT = 3333
-POOL_USER = "heriberto.worker1"
-POOL_PASS = "anything123"
+POOL_USER = "bc1qj9ap5kwqtu5498ssca6apxdu7zaju0rqty8k0p.EmbarcaMiner"
+POOL_PASS = "x"
 
-# Configurações UART
 UART_PORT = "/dev/ttyACM0"
 UART_BAUD = 115200
 
-# Verbosidade de logs
-VERBOSE = True
+# Difficulty extremamente fácil (modo TESTE)
+TEST_TARGET_BITS = 0x207fffff
 
-# Modo de operação
-# - DEMO: facilita o alvo para encontrar nonces com frequência.
-#         Shares enviados à pool vão quase sempre ser REJEITADOS,
-#         mas você consegue testar o fluxo completo.
-# - REAL: usa exatamente o target da pool (nbits). Shares aceitos
-#         serão extremamente raros em uma única FPGA.
-DEMO_MODE = False
+# =========================================================
+# SELEÇÃO DE MODO
+# =========================================================
 
-# Fator de facilitação no modo DEMO (target_local = target_pool * DEMO_FACTOR)
-# Valores grandes facilitam MUITO o alvo (encontrar mais rápido, mas share inválido).
-# TURBO: usa fator bem alto para encontrar nonces em poucos segundos.
-DEMO_FACTOR = 2**16  # ~65 mil vezes mais fácil que o target da pool
+print("""
+Selecione o modo:
+  1 - MODO TESTE (difficulty baixa / dashboard)
+  2 - MODO REAL  (difficulty da pool)
+""")
 
-# Dificuldade atual de share informada pela pool (mining.set_difficulty)
-current_difficulty = 1.0
+mode = input(">>> ").strip()
 
+if mode == "1":
+    MODE_TEST = True
+    print("\n Iniciando em MODO TESTE\n")
+elif mode == "2":
+    MODE_TEST = False
+    print("\n Iniciando em MODO REAL\n")
+else:
+    print("Modo inválido.")
+    sys.exit(1)
 
-def debug_print(*args):
-    """Imprime logs adicionais quando VERBOSE estiver habilitado."""
-    if VERBOSE:
-        print("[DEBUG]", *args)
+# =========================================================
+# FUNÇÕES AUXILIARES
+# =========================================================
 
-def connect_pool():
-    """Conecta à pool via Stratum."""
-    print(f"Conectando à pool {POOL_HOST}:{POOL_PORT}...")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(30)
-    
-    try:
-        sock.connect((POOL_HOST, POOL_PORT))
-    except Exception as e:
-        print(f"Erro ao conectar: {e}")
-        return None
-    
-    subscribe = {"id": 1, "method": "mining.subscribe", "params": ["proxy_fpga/1.0"]}
-    debug_print("SEND subscribe:", subscribe)
-    sock.send((json.dumps(subscribe) + "\n").encode())
-    
-    time.sleep(0.5)
-    authorize = {"id": 2, "method": "mining.authorize", "params": [POOL_USER, POOL_PASS]}
-    debug_print("SEND authorize:", authorize)
-    sock.send((json.dumps(authorize) + "\n").encode())
-    
-    return sock
+def bits_to_target(nbits_hex):
+    n = int(nbits_hex, 16)
+    exp = n >> 24
+    mant = n & 0xFFFFFF
+    return mant << (8 * (exp - 3))
 
-def calculate_merkle_root(coinbase_hex, merkle_branches):
-    """Calcula merkle root."""
-    h = hashlib.sha256(hashlib.sha256(binascii.unhexlify(coinbase_hex)).digest()).digest()
-    for branch in merkle_branches:
-        h = hashlib.sha256(hashlib.sha256(h + binascii.unhexlify(branch)).digest()).digest()
+def target_to_words_le(target):
+    return [(target >> (32 * i)) & 0xffffffff for i in range(8)]
+
+def calculate_merkle_root(coinbase_hex, branches):
+    h = hashlib.sha256(
+        hashlib.sha256(binascii.unhexlify(coinbase_hex)).digest()
+    ).digest()
+    for b in branches:
+        h = hashlib.sha256(
+            hashlib.sha256(h + binascii.unhexlify(b)).digest()
+        ).digest()
     return h
 
-
-def difficulty_to_target_words(difficulty: float):
-    """Converte dificuldade de share em target de 256 bits (8 words de 32 bits).
-
-    Fórmula aproximada baseada em diff1_target do Bitcoin:
-    target = diff1_target / difficulty
-    onde diff1_target = 0x00000000FFFF0000....
-    """
-
-    if difficulty <= 0:
-        difficulty = 1.0
-
-    diff1_target_int = int(
-        0x00000000FFFF0000000000000000000000000000000000000000000000000000
+def build_header(version, prevhash, merkle_root, ntime, nbits, nonce):
+    return (
+        struct.pack("<I", int(version, 16)) +
+        binascii.unhexlify(prevhash)[::-1] +
+        merkle_root[::-1] +
+        struct.pack("<I", int(ntime, 16)) +
+        struct.pack("<I", int(nbits, 16)) +
+        struct.pack("<I", nonce)
     )
 
-    target_int = int(diff1_target_int / float(difficulty))
+def format_hashrate(h):
+    if h < 1e3:
+        return f"{h:.2f} H/s"
+    elif h < 1e6:
+        return f"{h/1e3:.2f} kH/s"
+    elif h < 1e9:
+        return f"{h/1e6:.2f} MH/s"
+    else:
+        return f"{h/1e9:.2f} GH/s"
 
-    # Limita a 256 bits
-    target_int = max(0, min(target_int, (1 << 256) - 1))
+# =========================================================
+# FPGA
+# =========================================================
 
-    target_bytes_be = target_int.to_bytes(32, byteorder="big")
+class FPGAManager:
+    def __init__(self, port, baud):
+        self.uart = serial.Serial(port, baud, timeout=1)
+        time.sleep(2)
+        print(f" FPGA conectado em {port}")
 
-    target_words = []
-    for i in range(0, 32, 4):
-        word_le = int.from_bytes(target_bytes_be[i:i+4], byteorder="little")
-        target_words.append(word_le)
+    def clear_buffer(self):
+        if self.uart.in_waiting:
+            self.uart.read(self.uart.in_waiting)
 
-    return target_words
+    def send_command(self, cmd, clear=True):
+        if clear:
+            self.clear_buffer()
 
-def bits_to_target(nbits_hex, difficulty_divisor=1.0):
-    """Converte nbits (compact target) em 8 palavras de 32 bits.
-
-    - Em modo REAL: usa o target exato da pool.
-    - Em modo DEMO: multiplica o target por DEMO_FACTOR para facilitar
-      o alvo (mais soluções locais, porém normalmente inválidas para a pool).
-    """
-    nbits = int(nbits_hex, 16)
-    exp = (nbits >> 24) & 0xFF
-    mant = nbits & 0xFFFFFF
-
-    # Target inteiro de 256 bits em big-endian, como no Bitcoin
-    target_int = mant * (1 << (8 * (exp - 3)))
-
-    if difficulty_divisor and difficulty_divisor != 1.0:
-        target_int = int(target_int // difficulty_divisor)
-
-    # Aplica facilitação em modo DEMO (target_local = target_pool * DEMO_FACTOR)
-    if DEMO_MODE:
-        target_int = target_int * DEMO_FACTOR
-
-    # Limita a 256 bits
-    target_int = max(0, min(target_int, (1 << 256) - 1))
-
-    target_bytes_be = target_int.to_bytes(32, byteorder="big")
-
-    # Converte para 8 palavras de 32 bits em little-endian por palavra,
-    # que é o formato esperado pelo firmware (miner_job_cmd).
-    target_words = []
-    for i in range(0, 32, 4):
-        word_le = int.from_bytes(target_bytes_be[i:i+4], byteorder="little")
-        target_words.append(word_le)
-
-    return target_words
-
-def build_header_hex(version, prevhash, merkle_root, ntime, nbits):
-    """Monta header de 80 bytes em hex."""
-    v = struct.pack("<I", int(version, 16))
-    ph = binascii.unhexlify(prevhash)[::-1]
-    mr = merkle_root[::-1]
-    nt = struct.pack("<I", int(ntime, 16))
-    nb = struct.pack("<I", int(nbits, 16))
-    nc = struct.pack("<I", 0)
-    
-    header = v + ph + mr + nt + nb + nc
-    return binascii.hexlify(header).decode()
-
-def send_job_to_fpga(uart, header_hex, target_words):
-    """Envia job para FPGA via comando miner_job."""
-    target_hex = ''.join([f'{w:08x}' for w in target_words])
-    job_data = header_hex + target_hex
-    
-    if len(job_data) != 224:
-        print(f"ERRO: Job tem {len(job_data)} caracteres, esperado 224!")
-        return
-    
-    cmd = f"miner_job {job_data}\n"
-    print(f"Enviando job para FPGA ({len(job_data)} caracteres)")
-    debug_print("HEADER (primeiros 40 chars):", header_hex[:40])
-    debug_print("TARGET words:", [f"0x{w:08x}" for w in target_words])
-    
-    chunk_size = 64
-    for i in range(0, len(cmd), chunk_size):
-        chunk = cmd[i:i+chunk_size]
-        uart.write(chunk.encode())
+        self.uart.write((cmd + "\n").encode())
         time.sleep(0.05)
-    
-    time.sleep(1)
-    
-    uart.write(b"\n")
-    time.sleep(0.2)
-    response = uart.read(1024).decode(errors='ignore')
-    debug_print("FPGA resp (apos job):", response.replace("\n", "\\n"))
-    
-    if "Carregando job da pool" in response:
-        print("✓ Job recebido pela FPGA")
-    elif "Erro" in response:
-        print(f"✗ FPGA reportou erro: {response}")
 
-def wait_for_result(uart, timeout=60):
-    """Espera resultado da FPGA."""
-    start = time.time()
-    checks = 0
-    while time.time() - start < timeout:
-        time.sleep(0.5)
-        uart.write(b"miner_status\n")
-        time.sleep(0.2)
-        
-        response = uart.read(2048).decode(errors='ignore')
-        checks += 1
-        
-        if checks % 10 == 0:
-            elapsed = int(time.time() - start)
-            print(f"  [{elapsed}s] Minerando...")
-        
-        if "found=1" in response and "Nonce encontrado" in response:
-            for line in response.split('\n'):
-                if "Nonce encontrado" in line:
-                    try:
-                        nonce_str = line.split('(')[1].split(')')[0]
-                        nonce = int(nonce_str, 16)
-                        
-                        elapsed = time.time() - start
-                        if elapsed > 0:
-                            hashrate = nonce / elapsed
-                            print(f"⚡ Hashrate Estimado: {hashrate/1000:.2f} KH/s (Nonce: {nonce} em {elapsed:.1f}s)")
-                        
-                        return nonce
-                    except:
-                        continue
-    
-    return None
+        resp = b""
+        start = time.time()
+        while time.time() - start < 2:
+            if self.uart.in_waiting:
+                resp += self.uart.read(self.uart.in_waiting)
+                if b"RUNTIME>" in resp:
+                    break
+            time.sleep(0.01)
+
+        return "\n".join(
+            l.strip() for l in resp.decode(errors="ignore").splitlines()
+            if l.strip() and not l.startswith(cmd) and not l.startswith("RUNTIME>")
+        )
+
+    def send_job(self, header_hex, nbits_hex):
+        target = bits_to_target(nbits_hex)
+        words = target_to_words_le(target)
+
+        print("    Target:")
+        for i, w in enumerate(words):
+            print(f"      w{i}: 0x{w:08x}")
+
+        target_hex = "".join(struct.pack("<I", w).hex() for w in words)
+
+        self.send_command("miner_clear")
+        time.sleep(0.1)
+        self.send_command(f"miner_job {header_hex}{target_hex}")
+        print("    Job enviado ao FPGA")
+
+    def wait_for_nonce(self, timeout=30):
+        print("    Aguardando FPGA")
+
+        start = time.time()
+        hashes_est = 0
+
+        HASHES_POR_SEGUNDO_EST = 5000  # AJUSTE depois
+
+        for _ in range(timeout * 2):
+            time.sleep(0.5)
+
+            # estimativa
+            hashes_est += HASHES_POR_SEGUNDO_EST * 0.5
+            elapsed = time.time() - start
+
+            hashrate = hashes_est / elapsed if elapsed > 0 else 0
+
+            print(
+                f"\r Hashrate local: {hashrate/1e3:6.2f} kH/s | Hashes: {int(hashes_est)}",
+                end="",
+                flush=True
+            )
+
+            resp = self.send_command("miner_status", clear=False)
+            if resp:
+                for line in resp.splitlines():
+                    if "Nonce encontrado" in line and "(" in line:
+                        print(f"\n   📄 {line}")
+                        nonce_hex = line.split("(")[1].split(")")[0]
+                        return int(nonce_hex, 16)
+
+        print("\n    Timeout")
+        return None
+
+# =========================================================
+# STRATUM
+# =========================================================
+
+def connect_pool():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((POOL_HOST, POOL_PORT))
+
+    sock.send(json.dumps({
+        "id": 1,
+        "method": "mining.subscribe",
+        "params": ["fpga-proxy/1.0"]
+    }).encode() + b"\n")
+
+    time.sleep(0.5)
+
+    sock.send(json.dumps({
+        "id": 2,
+        "method": "mining.authorize",
+        "params": [POOL_USER, POOL_PASS]
+    }).encode() + b"\n")
+
+    return sock
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
-    print("=== Bitcoin FPGA Miner - Stratum Proxy ===")
-    print(f"Pool: {POOL_HOST}:{POOL_PORT}")
-    print(f"Worker: {POOL_USER}")
-    if DEMO_MODE:
-        print("Modo: TESTE/DEMO TURBO (target MUITO facilitado, pool quase sempre rejeita shares)")
-    else:
-        print("Modo: TARGET REAL da pool (shares reais, porém raros!)")
-    print()
-    
-    global current_difficulty
+    fpga = FPGAManager(UART_PORT, UART_BAUD)
+    sock = connect_pool()
 
-    pool_sock = None
-    uart = serial.Serial(UART_PORT, UART_BAUD, timeout=1)
-    time.sleep(2)
-    
+    buffer = ""
     extranonce1 = ""
     extranonce2_size = 0
-    share_counter = 0
-    reconnect_delay = 5
-    
-    print("Aguardando jobs da pool...\n")
-    
-    buffer = ""
+    extranonce_counter = 0
+    worker_registered = False
+
+    total_hashes = 0
+    global_start = time.time()
+
+    print(" Proxy rodando")
+
     while True:
-        try:
-            if pool_sock is None:
-                pool_sock = connect_pool()
-                if pool_sock is None:
-                    print(f"Falha na conexão. Tentando novamente em {reconnect_delay}s...")
-                    time.sleep(reconnect_delay)
-                    reconnect_delay = min(reconnect_delay * 2, 60)
-                    continue
-                else:
-                    reconnect_delay = 5
-                    buffer = ""
-            
-            data = pool_sock.recv(4096).decode()
-            if not data:
-                print("Pool fechou a conexão. Reconectando...")
-                pool_sock.close()
-                pool_sock = None
-                continue
-            
-            buffer += data
-            while '\n' in buffer:
-                line, buffer = buffer.split('\n', 1)
-                if not line.strip():
-                    continue
-                debug_print("RECV line:", line)
-
-                msg = json.loads(line)
-                
-                if msg.get("id") == 1 and "result" in msg:
-                    extranonce1 = msg["result"][1]
-                    extranonce2_size = msg["result"][2]
-                    print(f"✓ Conectado: extranonce1={extranonce1}")
-                
-                elif msg.get("id") == 2:
-                    if msg.get("result"):
-                        print("✓ Autorizado na pool!\n")
-                    else:
-                        print(f"✗ Erro de autorização: {msg}")
-                
-                elif msg.get("id") == 4:
-                    if msg.get("result") == True:
-                        print("🎉 *** SHARE ACEITO PELA POOL! *** 🎉\n")
-                    elif msg.get("error"):
-                        error = msg.get("error")
-                        print(f"✗ Share rejeitado pela pool: {error}\n")
-
-                # Atualização de dificuldade de share enviada pela pool
-                elif msg.get("method") == "mining.set_difficulty":
-                    params = msg.get("params", [])
-                    if params:
-                        try:
-                            current_difficulty = float(params[0])
-                            print(f"➜ Dificuldade de share atual: {current_difficulty}")
-                        except Exception:
-                            pass
-                
-                elif msg.get("method") == "mining.notify":
-                    params = msg["params"]
-                    job_id = params[0]
-                    prevhash = params[1]
-                    coinb1 = params[2]
-                    coinb2 = params[3]
-                    merkle_branches = params[4]
-                    version = params[5]
-                    nbits = params[6]
-                    ntime = params[7]
-                    
-                    print(f"\n=== Job {job_id} ===")
-                    
-                    share_counter += 1
-                    extranonce2 = f"{share_counter:0{extranonce2_size*2}x}"[-extranonce2_size*2:]
-                    print(f"Extranonce2: {extranonce2}")
-                    
-                    coinbase = coinb1 + extranonce1 + extranonce2 + coinb2
-                    merkle_root = calculate_merkle_root(coinbase, merkle_branches)
-                    header_hex = build_header_hex(version, prevhash, merkle_root, ntime, nbits)
-
-                    # Escolhe o target:
-                    # - REAL: usa dificuldade de share (mining.set_difficulty)
-                    # - DEMO: usa target derivado de nbits com facilitação
-                    if DEMO_MODE:
-                        target_words = bits_to_target(nbits)
-                        print("Target DEMO configurado (facilitado).")
-                    else:
-                        target_words = difficulty_to_target_words(current_difficulty)
-                        print(f"Target REAL configurado a partir da dificuldade de share {current_difficulty}.")
-                    
-                    send_job_to_fpga(uart, header_hex, target_words)
-                    
-                    # Tempo máximo esperando resultado deste job na FPGA (segundos)
-                    nonce = wait_for_result(uart, timeout=60)
-                    
-                    if nonce is not None:
-                        print(f"\n*** SHARE ENCONTRADO! Nonce: {nonce:08x} ***")
-                        
-                        submit = {
-                            "id": 4,
-                            "method": "mining.submit",
-                            "params": [POOL_USER, job_id, extranonce2, ntime, f"{nonce:08x}"]
-                        }
-                        debug_print("SEND submit:", submit)
-                        pool_sock.send((json.dumps(submit) + "\n").encode())
-                        print("📤 Submetido à pool...")
-                    else:
-                        print("Timeout. Próximo job...\n")
-        
-        except json.JSONDecodeError:
+        data = sock.recv(4096)
+        if not data:
+            sock = connect_pool()
             continue
-        except KeyboardInterrupt:
-            print("\n\nEncerrando...")
-            if pool_sock:
-                pool_sock.close()
-            break
-        except (ConnectionResetError, BrokenPipeError, OSError) as e:
-            print(f"Erro de conexão: {e}")
-            print("Reconectando em 5 segundos...")
-            if pool_sock:
-                pool_sock.close()
-            pool_sock = None
-            time.sleep(5)
-        except Exception as e:
-            print(f"Erro inesperado: {e}")
-            time.sleep(1)
+
+        buffer += data.decode()
+
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            if not line.strip():
+                continue
+
+            msg = json.loads(line)
+
+            if msg.get("id") == 1:
+                extranonce1 = msg["result"][1]
+                extranonce2_size = msg["result"][2]
+                print(f" Subscribed extranonce1={extranonce1}")
+
+            elif msg.get("method") == "mining.notify":
+                p = msg["params"]
+                job_id, prevhash, c1, c2, branches, version, nbits, ntime = p[:8]
+
+                effective_nbits = (
+                    f"{TEST_TARGET_BITS:08x}" if MODE_TEST else nbits
+                )
+
+                print(f"\n JOB {job_id}")
+                print(f"   nbits pool={nbits}")
+                print(f"   nbits efetivo={effective_nbits}")
+
+                extranonce2 = f"{extranonce_counter:0{extranonce2_size*2}x}"
+                extranonce_counter += 1
+
+                coinbase = c1 + extranonce1 + extranonce2 + c2
+                merkle = calculate_merkle_root(coinbase, branches)
+
+                header = build_header(
+                    version, prevhash, merkle,
+                    ntime, effective_nbits, 0
+                )
+
+                fpga.send_job(header.hex(), effective_nbits)
+
+                # Share forçado (apenas 1 vez no modo TESTE)
+                if MODE_TEST and not worker_registered:
+                    print("    Enviando SHARE FORÇADO (dashboard)")
+                    submit = {
+                        "id": 999,
+                        "method": "mining.submit",
+                        "params": [
+                            POOL_USER,
+                            job_id,
+                            extranonce2,
+                            ntime,
+                            "00000000"
+                        ]
+                    }
+                    sock.send((json.dumps(submit) + "\n").encode())
+                    worker_registered = True
+
+                job_start = time.time()
+                nonce = fpga.wait_for_nonce(60)
+                elapsed = time.time() - job_start
+
+                if nonce is None:
+                    continue
+
+                hashes = nonce + 1
+                total_hashes += hashes
+
+                hrate = hashes / elapsed
+                avg_hrate = total_hashes / (time.time() - global_start)
+
+                print(f"    Hashes testados: {hashes}")
+                print(f"    Hashrate local: {format_hashrate(hrate)}")
+                print(f"    Hashrate médio: {format_hashrate(avg_hrate)}")
+
+                submit = {
+                    "id": extranonce_counter,
+                    "method": "mining.submit",
+                    "params": [
+                        POOL_USER,
+                        job_id,
+                        extranonce2,
+                        ntime,
+                        f"{nonce:08x}"
+                    ]
+                }
+
+                sock.send((json.dumps(submit) + "\n").encode())
+                print("    SHARE enviado")
 
 if __name__ == "__main__":
     main()
