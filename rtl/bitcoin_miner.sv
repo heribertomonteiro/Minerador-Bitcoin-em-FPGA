@@ -78,22 +78,12 @@ module bitcoin_miner (
 
                 M_CHECK: begin
                     if (d_hash2 <= target) begin
+                        busy        <= 1'b0;
                         found       <= 1'b1;
                         found_nonce <= nonce;
                         found_hash  <= d_hash2;
-                        // Continua buscando? Ou para?
-                        // Para este teste, vamos parar
-                        busy        <= 1'b0;
-                        next_state  <= M_IDLE;
                     end else begin
                         nonce <= nonce + 32'd1;
-                        if (nonce == 32'hffffffff) begin
-                            // Não encontrou após todos os nonces
-                            busy       <= 1'b0;
-                            next_state <= M_IDLE;
-                        end else begin
-                            next_state <= M_PREP;  // Tenta próximo nonce
-                        end
                     end
                 end
 
